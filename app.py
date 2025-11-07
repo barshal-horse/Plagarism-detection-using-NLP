@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer, util
 
@@ -12,9 +13,9 @@ def load_bert_model():
     """Loads the Sentence-BERT model and caches it to avoid reloading."""
     return SentenceTransformer('all-MiniLM-L6-v2')
 
-def analyze_documents(docs, method):
+def analyze_documents(docs, method, lsi_components=100): ## MODIFIED ##: Added parameter for LSI
     """
-    Single function to run the selected analysis method (TF-IDF or BERT).
+    Single function to run the selected analysis method.
     Returns a sorted list of tuples with file pairs and their similarity score.
     """
     if not docs or len(docs) < 2:
@@ -27,6 +28,26 @@ def analyze_documents(docs, method):
         vectorizer = TfidfVectorizer(stop_words='english')
         tfidf_matrix = vectorizer.fit_transform(texts)
         sim_matrix = cosine_similarity(tfidf_matrix)
+
+    ## NEW ##: Added the LSI analysis block
+    elif "LSI" in method:
+        # 1. Create TF-IDF vectors first
+        vectorizer = TfidfVectorizer(stop_words='english')
+        tfidf_matrix = vectorizer.fit_transform(texts)
+        
+        # 2. Reduce dimensionality with TruncatedSVD (LSI)
+        # Ensure n_components is less than the number of documents
+        actual_components = min(lsi_components, len(filenames) - 1)
+        if actual_components < 1:
+            st.error("LSI requires at least 2 documents to run.")
+            return []
+            
+        svd = TruncatedSVD(n_components=actual_components)
+        lsi_matrix = svd.fit_transform(tfidf_matrix)
+        
+        # 3. Calculate similarity on the LSI matrix
+        sim_matrix = cosine_similarity(lsi_matrix)
+
     else:  # Sentence-BERT
         model = load_bert_model()
         embeddings = model.encode(texts, convert_to_tensor=True)
@@ -51,7 +72,22 @@ st.title("📊 Plagiarism Analysis Dashboard")
 with st.sidebar:
     st.header("⚙️ Settings")
     uploaded_files = st.file_uploader("Upload .txt files", type="txt", accept_multiple_files=True)
-    method = st.radio("Choose Analysis Method", ("Sentence-BERT (Advanced)", "TF-IDF (Classic)"))
+    
+    ## MODIFIED ##: Added LSI to the list of methods
+    method = st.radio(
+        "Choose Analysis Method",
+        ("Sentence-BERT (Advanced)", "Latent Semantic Indexing (LSI)", "TF-IDF (Classic)")
+    )
+    
+    ## NEW ##: Added a conditional input for LSI components
+    lsi_num_components = 100
+    if "LSI" in method:
+        lsi_num_components = st.number_input(
+            "Number of Concepts (LSI)",
+            min_value=1, max_value=500, value=100,
+            help="The number of underlying topics to find. A smaller number groups more words; a larger number is more specific."
+        )
+
     threshold = st.slider("Similarity Threshold (%) for Summary", 0, 100, 75)
     run_button = st.button("Analyze Documents")
 
@@ -68,7 +104,8 @@ if not uploaded_files or len(uploaded_files) < 2:
 documents = {file.name: file.getvalue().decode("utf-8") for file in uploaded_files}
 
 with st.spinner("Analyzing... This may take a moment."):
-    results = analyze_documents(documents, method)
+    ## MODIFIED ##: Pass the LSI components parameter to the analysis function
+    results = analyze_documents(documents, method, lsi_components=lsi_num_components)
 
 st.success("Analysis complete!")
 
@@ -112,23 +149,19 @@ with col1:
     
     display_df["Pair"] = display_df["File 1"] + " & " + display_df["File 2"]
     
-    # --- THIS IS THE CORRECTED SECTION ---
-    # 1. Create a single, sorted DataFrame first.
+    # Create a single, sorted DataFrame for the chart
     sorted_display_df = display_df.sort_values(by="Similarity Score", ascending=True)
 
-    # 2. Use this sorted DataFrame for all aspects of the chart.
     fig_pairs = px.bar(
         sorted_display_df,
         x="Similarity Score", 
         y="Pair", 
         orientation='h',
-        text=sorted_display_df["Similarity Score"].apply(lambda x: f'{x:.2%}'), # Use sorted data for text
+        text=sorted_display_df["Similarity Score"].apply(lambda x: f'{x:.2%}'),
         labels={'Similarity Score': 'Similarity Score (%)'}
     )
     fig_pairs.update_layout(xaxis_tickformat='.0%', yaxis_title="")
     st.plotly_chart(fig_pairs, use_container_width=True)
-    # --- END OF CORRECTED SECTION ---
-
 
 with col2:
     st.subheader("Distribution of Scores")
